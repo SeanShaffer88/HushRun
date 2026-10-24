@@ -1,0 +1,10 @@
+[package]
+name = "hushrun"
+version = "0.1.0"
+edition = "2021"
+description = "Run programs silently in the background — hidden windows, nothing on the taskbar, restorable on demand."
+license = "MIT"
+
+[[bin]]
+name = "hushrun"
+path = "src/main.rs"
