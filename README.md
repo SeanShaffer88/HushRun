@@ -19,6 +19,22 @@ was.
 
 ## Usage
 
+### Tray
+
+```
+hushrun            (or: hushrun tray)
+```
+
+Starts the tray icon. Its menu lists the programs currently
+hidden (click one to bring it back), offers **Restore all**,
+**Run a program hidden…** (pick an .exe), and **Exit**, which
+restores everything before quitting. While the tray is running
+it watches hidden programs continuously, so a window one of them
+opens later is tucked away too. The tray and the command line
+share the same session list.
+
+### Command line
+
 ```
 hushrun run [--watch <seconds>] <program> [args...]
 hushrun <program> [args...]          shorthand for run
@@ -26,6 +42,7 @@ hushrun hide <pid|name>              hide a running program's windows
 hushrun list                         list hidden programs
 hushrun restore <pid|name>           bring a hidden program back
 hushrun restore-all                  bring everything back
+hushrun version
 ```
 
 `run` starts the program hidden and watches it for 15 seconds by
@@ -54,8 +71,9 @@ itself has exited.
   period will appear; run it again with a longer `--watch`, or
   `hide` it again.
 - Hiding is per top-level window: child dialogs a program opens
-  later, outside the watch window, are not auto-hidden in v0.1.
-  The resident tray mode on the roadmap covers that case.
+  later, outside the watch window, are not auto-hidden by the CLI
+  alone — the tray mode watches continuously and covers that case
+  while it is running.
 
 ## Build
 
@@ -70,11 +88,13 @@ unverified).
 
 ## Status
 
-v0.1.0 — the command-line core. Logic is unit-tested in CI;
-behavior on a real Windows desktop is **unverified** until the
-on-machine check (run Notepad hidden, confirm no window or
-taskbar button, restore it) has been run. A resident tray mode is
-planned next; see `docs/PLAN.md`.
+v0.2.0 — tray mode added on top of the 0.1.0 command-line core:
+tray icon with a restore menu, a run-hidden file picker,
+continuous watching while resident, and restore-all on exit.
+Logic is unit-tested in CI; behavior on a real Windows desktop is
+**unverified** until the on-machine check (run Notepad hidden,
+confirm no window or taskbar button, restore it; then the same
+through the tray menu) has been run. See `docs/PLAN.md`.
 
 ## License
 
