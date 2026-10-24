@@ -25,6 +25,20 @@ pub fn find_process_by_name(_name: &str) -> Option<(u32, String)> {
     None
 }
 
+#[allow(dead_code)]
+pub fn window_title(_hwnd: isize) -> String {
+    String::new()
+}
+
+pub fn all_processes() -> Vec<(u32, String)> {
+    Vec::new()
+}
+
+#[allow(dead_code)]
+pub fn set_autostart(_enabled: bool, _exe: &std::path::Path) -> Result<(), String> {
+    Err("starting with Windows is only available on Windows".to_string())
+}
+
 // The next five serve the Windows tray; here they exist so the
 // seam is complete on every platform.
 #[allow(dead_code)]
