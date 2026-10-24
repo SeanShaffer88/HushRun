@@ -25,15 +25,17 @@ was.
 hushrun            (or: hushrun tray)
 ```
 
-Starts the tray icon. Its menu lists the programs currently
-hidden (click one to bring it back), offers **Restore all**, a
-**Hide a running program** submenu (every app with a visible
-window — pick one to hide it), **Run a program hidden…** (pick
-an .exe), and **Exit**, which restores everything before
-quitting. While the tray is running it watches hidden programs
-continuously, so a window one of them opens later is tucked
-away too. The tray and the command line share the same session
-list.
+Starts the tray icon (bright while anything is hidden, dim
+when nothing is). Its menu lists the programs currently hidden
+— each opens a submenu to restore all of its windows or just
+one — and offers **Restore all**, a **Hide a running program**
+submenu (every app with a visible window — pick one to hide
+it), **Run a program hidden…** (pick an .exe), **Settings…**,
+settings export/import, **Restart as administrator**, and
+**Exit**, which restores everything before quitting. While the
+tray is running it watches hidden programs continuously, so a
+window one of them opens later is tucked away too. The tray and
+the command line share the same session list.
 
 Two global hotkeys work while the tray runs: **Ctrl+Alt+H**
 hides the program in the foreground window, and **Ctrl+Alt+U**
@@ -51,12 +53,29 @@ icon puts itself back.
 ```
 hushrun run [--watch <seconds>] <program> [args...]
 hushrun <program> [args...]          shorthand for run
-hushrun hide <pid|name>              hide a running program's windows
-hushrun list                         list hidden programs
-hushrun restore <pid|name>           bring a hidden program back
+hushrun hide <pid|name|pattern>      hide a running program's windows
+                                     (pattern may contain *, e.g. 'note*')
+hushrun list [--json]                list hidden programs
+hushrun restore <pid|name|pattern>   bring a hidden program back
 hushrun restore-all                  bring everything back
+hushrun doctor                       check the store, config and sessions
+hushrun export <file>                write settings to a file
+hushrun import <file>                load settings from a file
 hushrun version
 ```
+
+### Settings, profiles, and portable mode
+
+The tray's **Settings…** window holds the global preferences
+(start with Windows, notifications, default watch window) and
+your **program entries**: per-program arguments, watch window
+and start delay — and, with "Run hidden at tray start" ticked,
+an auto-start rule the tray applies every time it launches.
+Programs that were hidden when you shut down are relaunched
+hidden at the next tray start. Settings live in
+`%LOCALAPPDATA%\HushRun\config.json`; put a `portable.txt`
+next to `hushrun.exe` and sessions + settings live beside the
+exe instead.
 
 `run` starts the program hidden and watches it for 15 seconds by
 default, hiding any windows it opens in that time (many programs
@@ -101,15 +120,14 @@ unverified).
 
 ## Status
 
-v0.3.0 — the tray grows up: hide already-running programs from
-its menu, Ctrl+Alt+H / Ctrl+Alt+U hotkeys, unclean-exit and
-Explorer-restart recovery, and balloons for hide/restore/exit
-events, on top of the 0.2.0 tray and 0.1.0 CLI core. Logic is
-unit-tested in CI; behavior on a real Windows desktop is
-**unverified** until the on-machine check (run Notepad hidden,
-confirm no window or taskbar button, restore it; then the same
-through the tray menu and hotkeys) has been run. See
-`docs/PLAN.md`.
+v0.4.0 — settings window, program profiles and auto-start
+rules, relaunch after reboot, per-window restore, icon state,
+restart-as-administrator, settings export/import, `doctor`,
+`list --json`, wildcard hide/restore, and portable mode, on top
+of the 0.3.0 tray and CLI. The 0.1–0.3 behavior was verified on
+a real Windows desktop on 2026-10-24; the new 0.4.0 surface is
+**partially verified** (unit tests + CI) until the next
+on-machine pass. See `docs/PLAN.md`.
 
 ## License
 
