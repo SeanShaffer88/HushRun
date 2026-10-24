@@ -6,7 +6,18 @@ HushRun runs programs silently in the background on Windows: it
 starts a program with its windows hidden — nothing on screen,
 nothing on the taskbar — keeps hiding windows the program opens
 later, and brings everything back when you ask. One small
-executable, no installer, no dependencies, works offline.
+executable, no dependencies, works offline.
+
+## Download
+
+Grab the latest from the
+[GitHub Releases](https://github.com/SeanShaffer88/HushRun/releases)
+page — an installer (`HushRun-Setup-…-x64.exe`, per-user, no
+admin needed) or the portable single-file exe
+(`HushRun-…-portable.exe`). Builds are unsigned, so Windows
+SmartScreen will ask once — choose "More info → Run anyway".
+For portable use, drop a `portable.txt` next to the exe and
+HushRun keeps its sessions and settings right there.
 
 ## Why
 
