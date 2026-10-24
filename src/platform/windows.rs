@@ -87,6 +87,13 @@ extern "system" {
     fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
     fn GetForegroundWindow() -> Hwnd;
     fn GetCurrentProcessId() -> u32;
+}
+
+// The registry API lives in advapi32 — nothing else in the crate
+// links it, so these get their own block with the link attribute
+// (without it the release link fails with unresolved externals).
+#[link(name = "advapi32")]
+extern "system" {
     fn RegCreateKeyExW(
         key: Handle,
         sub_key: *const u16,
