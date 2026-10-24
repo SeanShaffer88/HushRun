@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.3.0 — 2026-10-24
+
+### Added
+
+- **Hide a running program from the tray**: the menu gains a
+  "Hide a running program" submenu listing every app with a
+  visible window — pick one and it's hidden and recorded, no
+  terminal needed.
+- **Global hotkeys** (while the tray runs): `Ctrl+Alt+H` hides
+  the foreground window's program; `Ctrl+Alt+U` restores
+  everything. If another app owns a combo, that hotkey simply
+  doesn't register and the menu is unaffected.
+- **Unclean-exit recovery**: if the tray is killed or the PC
+  loses power, the next launch notices and offers to restore
+  the programs that were left hidden.
+- **Explorer-restart recovery**: the tray icon re-registers
+  itself if Explorer restarts.
+- **Balloons**: a quiet notification when a program is hidden,
+  restored, started hidden, or exits while hidden.
+
+### Notes
+
+- The CLI is unchanged. Tray behavior on a real desktop remains
+  unverified until the on-machine check.
+
 ## 0.2.0 — 2026-10-24
 
 ### Added
