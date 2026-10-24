@@ -18,16 +18,19 @@ pub enum Command {
         target: String,
     },
     RestoreAll,
+    Tray,
     Help,
     Version,
 }
 
 pub fn parse(argv: &[String]) -> Result<Command, String> {
     let Some(first) = argv.first() else {
-        return Ok(Command::Help);
+        // No arguments (e.g. double-clicked): start the tray.
+        return Ok(Command::Tray);
     };
     match first.as_str() {
         "run" => parse_run(&argv[1..]),
+        "tray" => Ok(Command::Tray),
         "hide" => parse_target(&argv[1..], "hide").map(|target| Command::Hide { target }),
         "restore" => parse_target(&argv[1..], "restore").map(|target| Command::Restore { target }),
         "restore-all" => Ok(Command::RestoreAll),
@@ -86,6 +89,8 @@ pub const HELP: &str = "\
 HushRun — run programs silently in the background
 
 USAGE:
+  hushrun                                start the tray icon (same as `tray`)
+  hushrun tray                           start the tray icon
   hushrun run [--watch <seconds>] <program> [args...]
   hushrun <program> [args...]            (shorthand for run)
   hushrun hide <pid|name>                hide a running program's windows
@@ -96,7 +101,9 @@ USAGE:
 
 `run` starts the program with its window hidden and keeps hiding
 windows it opens for --watch seconds (default 15). Sessions are
-remembered, so `restore` works from a later invocation too.
+remembered, so `restore` works from a later invocation too. The
+tray icon watches hidden programs continuously and restores them
+from its menu.
 ";
 
 #[cfg(test)]
@@ -163,7 +170,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_is_help() {
-        assert_eq!(parse(&[]).unwrap(), Command::Help);
+    fn empty_is_tray_and_help_is_explicit() {
+        assert_eq!(parse(&[]).unwrap(), Command::Tray);
+        assert_eq!(parse(&v(&["tray"])).unwrap(), Command::Tray);
+        assert_eq!(parse(&v(&["help"])).unwrap(), Command::Help);
     }
 }
