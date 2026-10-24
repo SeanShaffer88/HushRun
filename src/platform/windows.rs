@@ -87,6 +87,27 @@ extern "system" {
     fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
     fn GetForegroundWindow() -> Hwnd;
     fn GetCurrentProcessId() -> u32;
+    fn RegCreateKeyExW(
+        key: Handle,
+        sub_key: *const u16,
+        reserved: u32,
+        class: *mut u16,
+        options: u32,
+        sam: u32,
+        attrs: *mut c_void,
+        out_key: *mut Handle,
+        disposition: *mut u32,
+    ) -> i32;
+    fn RegSetValueExW(
+        key: Handle,
+        name: *const u16,
+        reserved: u32,
+        kind: u32,
+        data: *const u8,
+        size: u32,
+    ) -> i32;
+    fn RegDeleteValueW(key: Handle, name: *const u16) -> i32;
+    fn RegCloseKey(key: Handle) -> i32;
     fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
     fn Process32FirstW(h: Handle, entry: *mut ProcessEntry32W) -> Bool;
     fn Process32NextW(h: Handle, entry: *mut ProcessEntry32W) -> Bool;
@@ -269,6 +290,100 @@ pub fn exe_name(pid: u32) -> Option<String> {
         }
         CloseHandle(snapshot);
         found
+    }
+}
+
+/// The title text of a window ("" when it has none).
+pub fn window_title(hwnd: isize) -> String {
+    let mut buf = [0u16; 512];
+    let len = unsafe { GetWindowTextW(hwnd as Hwnd, buf.as_mut_ptr(), buf.len() as i32) };
+    if len <= 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buf[..len as usize])
+}
+
+/// Every process the toolhelp snapshot can see: (pid, exe name).
+pub fn all_processes() -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot.is_null() || snapshot as isize == -1 {
+            return out;
+        }
+        let mut entry: ProcessEntry32W = std::mem::zeroed();
+        entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                let len = entry
+                    .sz_exe_file
+                    .iter()
+                    .position(|&c| c == 0)
+                    .unwrap_or(MAX_PATH);
+                out.push((
+                    entry.th32_process_id,
+                    String::from_utf16_lossy(&entry.sz_exe_file[..len]),
+                ));
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+    }
+    out
+}
+
+const HKEY_CURRENT_USER: Handle = 0x8000_0001usize as Handle;
+const KEY_SET_VALUE: u32 = 0x0002;
+const REG_SZ: u32 = 1;
+
+/// Add or remove HushRun's per-user Run entry (what makes the
+/// tray start with Windows). HKCU only — never needs elevation.
+pub fn set_autostart(enabled: bool, exe: &std::path::Path) -> Result<(), String> {
+    let sub = wide("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
+    let name = wide("HushRun");
+    unsafe {
+        let mut key: Handle = std::ptr::null_mut();
+        let rc = RegCreateKeyExW(
+            HKEY_CURRENT_USER,
+            sub.as_ptr(),
+            0,
+            std::ptr::null_mut(),
+            0,
+            KEY_SET_VALUE,
+            std::ptr::null_mut(),
+            &mut key,
+            std::ptr::null_mut(),
+        );
+        if rc != 0 {
+            return Err(format!("could not open the Run key (error {rc})"));
+        }
+        let result = if enabled {
+            let value = wide(&format!("\"{}\" tray", exe.to_string_lossy()));
+            let rc = RegSetValueExW(
+                key,
+                name.as_ptr(),
+                0,
+                REG_SZ,
+                value.as_ptr() as *const u8,
+                (value.len() * 2) as u32,
+            );
+            if rc == 0 {
+                Ok(())
+            } else {
+                Err(format!("could not write the Run entry (error {rc})"))
+            }
+        } else {
+            let rc = RegDeleteValueW(key, name.as_ptr());
+            if rc == 0 || rc == 2 {
+                Ok(()) // 2 = value already absent
+            } else {
+                Err(format!("could not remove the Run entry (error {rc})"))
+            }
+        };
+        RegCloseKey(key);
+        result
     }
 }
 
