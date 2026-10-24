@@ -1,5 +1,52 @@
 # Changelog
 
+## 0.4.0 — 2026-10-24
+
+The remaining enhancement batch: settings, profiles, automation,
+and scripting.
+
+### Added
+
+- **Settings window** (tray → Settings…): start HushRun with
+  Windows (per-user Run entry), notification toggle, default
+  watch window, and the program-entries editor.
+- **Program entries**: per-program profiles (arguments, watch
+  window, start delay) and auto-start rules — entries marked
+  "Run hidden at tray start" are hidden, or launched hidden,
+  whenever the tray starts.
+- **Relaunch after reboot**: sessions whose program exited while
+  HushRun was away are relaunched hidden at tray start when the
+  program file is still there.
+- **Icon state**: the tray icon is bright while anything is
+  hidden and dims when nothing is.
+- **Per-window restore**: each hidden program's tray entry is a
+  submenu — restore all its windows or just one (hidden windows
+  are checkmarked).
+- **Restart as administrator** (tray menu): relaunches the tray
+  elevated so it can hide elevated programs; declining the UAC
+  prompt leaves the current instance running.
+- **About HushRun** (tray menu).
+- **Settings export/import**: tray menu items and
+  `hushrun export <file>` / `hushrun import <file>`; import keeps
+  the previous settings as `config.json.bak`.
+- **`hushrun doctor`**: reports the data folder, settings
+  health, tray marker, and every session's live state.
+- **`hushrun list --json`**: the session list as JSON.
+- **Wildcard hide/restore**: `hushrun hide 'note*'` hides every
+  running match; restore accepts the same patterns.
+- **Portable mode**: a `portable.txt` next to `hushrun.exe`
+  keeps sessions and settings beside the exe instead of in
+  `%LOCALAPPDATA%`.
+
+### Notes
+
+- Settings live in `config.json` next to `sessions.json`.
+  The tray's Settings "Arguments" field splits on spaces (quote
+  handling for exotic args remains a CLI job for now).
+- Everything from 0.3.0 is unchanged in behavior. New tray
+  surface is unverified on a real desktop until the next
+  on-machine check.
+
 ## 0.3.0 — 2026-10-24
 
 ### Added
