@@ -1,14 +1,15 @@
 //! Hidden-program sessions and their on-disk store.
 //!
 //! The store is a single JSON file written atomically (temp file +
-//! replace). The JSON reader/writer here is deliberately small: it
-//! covers exactly the shapes the store uses, and anything malformed
-//! is skipped rather than crashing — a corrupt store must never
-//! strand a user's hidden programs without `restore-all` recourse
-//! from a fresh state.
+//! replace), using the small shared JSON reader/writer in
+//! `crate::json`. Anything malformed is skipped rather than
+//! crashing — a corrupt store must never strand a user's hidden
+//! programs without `restore-all` recourse from a fresh state.
 
 use std::fs;
 use std::path::{Path, PathBuf};
+
+use crate::json::{self, Json};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Session {
@@ -20,6 +21,16 @@ pub struct Session {
 }
 
 impl Session {
+    /// The file-name part of the program path (both separators —
+    /// session programs are Windows paths regardless of the OS
+    /// this code is compiled for).
+    pub fn file_name(&self) -> &str {
+        self.program
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or(&self.program)
+    }
+
     /// Does `target` (a pid string or a program name fragment) pick
     /// out this session? Name matching is on the file name only,
     /// case-insensitive, and tolerates a missing `.exe`.
@@ -27,26 +38,46 @@ impl Session {
         if let Ok(pid) = target.parse::<u32>() {
             return pid == self.pid;
         }
-        // Split on both separators: session programs are Windows
-        // paths regardless of the OS this code is compiled for.
-        let file_name = self
-            .program
-            .rsplit(['/', '\\'])
-            .next()
-            .unwrap_or(&self.program)
-            .to_lowercase();
+        let file_name = self.file_name().to_lowercase();
         let wanted = target.to_lowercase();
         file_name == wanted || file_name == format!("{wanted}.exe")
     }
 }
 
-pub fn store_path() -> PathBuf {
-    if let Ok(local) = std::env::var("LOCALAPPDATA") {
-        if !local.is_empty() {
-            return Path::new(&local).join("HushRun").join("sessions.json");
+/// Where HushRun keeps its data. Portable mode: a `portable.txt`
+/// next to the executable puts everything beside the exe.
+/// Otherwise `%LOCALAPPDATA%\HushRun`.
+pub fn data_dir() -> PathBuf {
+    let exe_dir = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.to_path_buf()));
+    let portable = exe_dir
+        .as_ref()
+        .map(|d| d.join("portable.txt").exists())
+        .unwrap_or(false);
+    resolve_data_dir(portable, exe_dir, std::env::var("LOCALAPPDATA").ok())
+}
+
+pub(crate) fn resolve_data_dir(
+    portable: bool,
+    exe_dir: Option<PathBuf>,
+    local_app_data: Option<String>,
+) -> PathBuf {
+    if portable {
+        if let Some(dir) = exe_dir {
+            return dir;
         }
     }
-    std::env::temp_dir().join("HushRun").join("sessions.json")
+    if let Some(local) = local_app_data {
+        if !local.is_empty() {
+            return Path::new(&local).join("HushRun");
+        }
+    }
+    std::env::temp_dir().join("HushRun")
+}
+
+pub fn store_path() -> PathBuf {
+    data_dir().join("sessions.json")
 }
 
 pub fn load(path: &Path) -> Vec<Session> {
@@ -67,30 +98,18 @@ pub fn save(path: &Path, sessions: &[Session]) -> std::io::Result<()> {
 
 // ---------- rendering ----------
 
-fn esc(text: &str) -> String {
-    let mut out = String::with_capacity(text.len() + 2);
-    for ch in text.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
 pub fn render_store(sessions: &[Session]) -> String {
     let mut out = String::from("[\n");
     for (i, s) in sessions.iter().enumerate() {
-        let args: Vec<String> = s.args.iter().map(|a| format!("\"{}\"", esc(a))).collect();
+        let args: Vec<String> = s
+            .args
+            .iter()
+            .map(|a| format!("\"{}\"", json::esc(a)))
+            .collect();
         out.push_str(&format!(
             "  {{\"pid\": {}, \"program\": \"{}\", \"args\": [{}], \"started_unix\": {}, \"windows_hidden\": {}}}{}\n",
             s.pid,
-            esc(&s.program),
+            json::esc(&s.program),
             args.join(", "),
             s.started_unix,
             s.windows_hidden,
@@ -101,226 +120,33 @@ pub fn render_store(sessions: &[Session]) -> String {
     out
 }
 
-// ---------- parsing (small, tolerant) ----------
-
-#[derive(Debug, Clone, PartialEq)]
-enum Value {
-    Num(f64),
-    Str(String),
-    Arr(Vec<Value>),
-    Obj(Vec<(String, Value)>),
-    Other,
-}
-
-struct Parser<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-}
-
-impl<'a> Parser<'a> {
-    fn new(text: &'a str) -> Self {
-        Self {
-            bytes: text.as_bytes(),
-            pos: 0,
-        }
-    }
-
-    fn peek(&self) -> Option<u8> {
-        self.bytes.get(self.pos).copied()
-    }
-
-    fn skip_ws(&mut self) {
-        while matches!(self.peek(), Some(b' ' | b'\t' | b'\n' | b'\r')) {
-            self.pos += 1;
-        }
-    }
-
-    fn value(&mut self) -> Option<Value> {
-        self.skip_ws();
-        match self.peek()? {
-            b'{' => {
-                self.pos += 1;
-                let mut fields = Vec::new();
-                loop {
-                    self.skip_ws();
-                    if self.peek() == Some(b'}') {
-                        self.pos += 1;
-                        return Some(Value::Obj(fields));
-                    }
-                    let key = match self.value()? {
-                        Value::Str(s) => s,
-                        _ => return None,
-                    };
-                    self.skip_ws();
-                    if self.peek() != Some(b':') {
-                        return None;
-                    }
-                    self.pos += 1;
-                    let val = self.value()?;
-                    fields.push((key, val));
-                    self.skip_ws();
-                    match self.peek() {
-                        Some(b',') => self.pos += 1,
-                        Some(b'}') => {
-                            self.pos += 1;
-                            return Some(Value::Obj(fields));
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-            b'[' => {
-                self.pos += 1;
-                let mut items = Vec::new();
-                loop {
-                    self.skip_ws();
-                    if self.peek() == Some(b']') {
-                        self.pos += 1;
-                        return Some(Value::Arr(items));
-                    }
-                    items.push(self.value()?);
-                    self.skip_ws();
-                    match self.peek() {
-                        Some(b',') => self.pos += 1,
-                        Some(b']') => {
-                            self.pos += 1;
-                            return Some(Value::Arr(items));
-                        }
-                        _ => return None,
-                    }
-                }
-            }
-            b'"' => self.string().map(Value::Str),
-            b'-' | b'0'..=b'9' => self.number().map(Value::Num),
-            _ => {
-                // true / false / null — consumed, not used.
-                while matches!(self.peek(), Some(b'a'..=b'z')) {
-                    self.pos += 1;
-                }
-                Some(Value::Other)
-            }
-        }
-    }
-
-    fn string(&mut self) -> Option<String> {
-        if self.peek() != Some(b'"') {
-            return None;
-        }
-        self.pos += 1;
-        let mut out = String::new();
-        loop {
-            let byte = self.peek()?;
-            self.pos += 1;
-            match byte {
-                b'"' => return Some(out),
-                b'\\' => {
-                    let e = self.peek()?;
-                    self.pos += 1;
-                    match e {
-                        b'"' => out.push('"'),
-                        b'\\' => out.push('\\'),
-                        b'/' => out.push('/'),
-                        b'n' => out.push('\n'),
-                        b'r' => out.push('\r'),
-                        b't' => out.push('\t'),
-                        b'b' => out.push('\u{0008}'),
-                        b'f' => out.push('\u{000C}'),
-                        b'u' => {
-                            let hex = self.bytes.get(self.pos..self.pos + 4)?;
-                            let code =
-                                u32::from_str_radix(std::str::from_utf8(hex).ok()?, 16).ok()?;
-                            out.push(char::from_u32(code).unwrap_or('\u{FFFD}'));
-                            self.pos += 4;
-                        }
-                        _ => return None,
-                    }
-                }
-                _ => {
-                    // Reassemble UTF-8: collect the full sequence.
-                    let start = self.pos - 1;
-                    let len = utf8_len(byte);
-                    let end = start + len;
-                    let slice = self.bytes.get(start..end)?;
-                    out.push_str(std::str::from_utf8(slice).ok()?);
-                    self.pos = end;
-                }
-            }
-        }
-    }
-
-    fn number(&mut self) -> Option<f64> {
-        let start = self.pos;
-        while matches!(
-            self.peek(),
-            Some(b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
-        ) {
-            self.pos += 1;
-        }
-        std::str::from_utf8(&self.bytes[start..self.pos])
-            .ok()?
-            .parse()
-            .ok()
-    }
-}
-
-fn utf8_len(first: u8) -> usize {
-    if first < 0x80 {
-        1
-    } else if first >> 5 == 0b110 {
-        2
-    } else if first >> 4 == 0b1110 {
-        3
-    } else {
-        4
-    }
-}
-
-fn get<'a>(fields: &'a [(String, Value)], key: &str) -> Option<&'a Value> {
-    fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
-}
-
-fn as_u64(value: &Value) -> Option<u64> {
-    match value {
-        Value::Num(n) if *n >= 0.0 => Some(*n as u64),
-        _ => None,
-    }
-}
-
-fn as_str(value: &Value) -> Option<&str> {
-    match value {
-        Value::Str(s) => Some(s),
-        _ => None,
-    }
-}
+// ---------- parsing ----------
 
 pub fn parse_store(text: &str) -> Option<Vec<Session>> {
-    let mut parser = Parser::new(text);
-    let Value::Arr(items) = parser.value()? else {
+    let Json::Arr(items) = json::parse(text)? else {
         return None;
     };
     let mut sessions = Vec::new();
     for item in items {
-        let Value::Obj(fields) = item else { continue };
+        let Json::Obj(fields) = item else { continue };
         let (Some(pid), Some(program)) = (
-            get(&fields, "pid").and_then(as_u64),
-            get(&fields, "program").and_then(as_str),
+            json::get(&fields, "pid").and_then(json::as_u64),
+            json::get(&fields, "program").and_then(json::as_str),
         ) else {
             continue;
-        };
-        let args = match get(&fields, "args") {
-            Some(Value::Arr(values)) => values
-                .iter()
-                .filter_map(as_str)
-                .map(str::to_owned)
-                .collect(),
-            _ => Vec::new(),
         };
         sessions.push(Session {
             pid: pid as u32,
             program: program.to_owned(),
-            args,
-            started_unix: get(&fields, "started_unix").and_then(as_u64).unwrap_or(0),
-            windows_hidden: get(&fields, "windows_hidden").and_then(as_u64).unwrap_or(0) as u32,
+            args: json::get(&fields, "args")
+                .map(json::as_str_arr)
+                .unwrap_or_default(),
+            started_unix: json::get(&fields, "started_unix")
+                .and_then(json::as_u64)
+                .unwrap_or(0),
+            windows_hidden: json::get(&fields, "windows_hidden")
+                .and_then(json::as_u64)
+                .unwrap_or(0) as u32,
         });
     }
     Some(sessions)
@@ -369,5 +195,18 @@ mod tests {
         assert!(s.matches("TOOL.EXE"));
         assert!(!s.matches("other"));
         assert!(!s.matches("9999"));
+    }
+
+    #[test]
+    fn data_dir_modes() {
+        let exe = PathBuf::from("D:\\Tools\\HushRun");
+        assert_eq!(
+            resolve_data_dir(true, Some(exe.clone()), Some("C:\\LAD".into())),
+            exe
+        );
+        assert_eq!(
+            resolve_data_dir(false, Some(exe), Some("C:\\LAD".into())),
+            Path::new("C:\\LAD").join("HushRun")
+        );
     }
 }
