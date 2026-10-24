@@ -7,7 +7,7 @@ use crate::cli::Command;
 use crate::platform;
 use crate::session::{self, Session};
 
-fn now_unix() -> u64 {
+pub(crate) fn now_unix() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
@@ -18,7 +18,7 @@ fn now_unix() -> u64 {
 /// for `watch_secs`, hiding new windows as they appear (many
 /// programs create their window a beat after starting). Returns how
 /// many distinct windows were hidden.
-fn watch_hide(pid: u32, watch_secs: u64) -> usize {
+pub(crate) fn watch_hide(pid: u32, watch_secs: u64) -> usize {
     let mut hidden: HashSet<isize> = HashSet::new();
     let deadline = std::time::Instant::now() + Duration::from_secs(watch_secs);
     loop {
@@ -35,7 +35,7 @@ fn watch_hide(pid: u32, watch_secs: u64) -> usize {
     hidden.len()
 }
 
-fn show_all(pid: u32) -> usize {
+pub(crate) fn show_all(pid: u32) -> usize {
     let mut shown = 0;
     for hwnd in platform::windows_of(pid) {
         if platform::set_window_visible(hwnd, true) {
@@ -185,6 +185,7 @@ pub fn execute(cmd: Command) -> Result<String, String> {
             session::save(&path, &[]).map_err(|e| format!("could not save sessions: {e}"))?;
             Ok(format!("Brought back {restored} hidden program(s)."))
         }
+        Command::Tray => crate::tray::run(),
         Command::Help | Command::Version => {
             unreachable!("handled in main")
         }
