@@ -46,6 +46,45 @@ it yet).
   touches the target process's memory; it only asks the window
   manager to hide/show top-level windows it owns.
 
+## Landed in v0.4 (2026-10-24)
+
+The full remaining enhancement batch (items 4–20 of the
+2026-10-24 list):
+
+- **Settings + config**: `config.json` beside the session store
+  (shared tolerant JSON module extracted to `src/json.rs`);
+  a Settings window (plain child controls: checkboxes, edits, a
+  listbox) editing globals + program entries; field edits commit
+  on selection change or OK. Start-with-Windows is an HKCU Run
+  value (platform::set_autostart), applied on settings save and
+  reported honestly in `import` output when deferred.
+- **Program entries** unify profiles and auto-start rules:
+  {program, args, watch_seconds?, delay_seconds, auto_start}.
+  The tray applies auto-start entries on worker threads after
+  their delay (hide if running, launch hidden if not).
+- **Relaunch after reboot**: dead sessions with an on-disk
+  program path are relaunched hidden at tray start (before the
+  first tick prunes), args preserved.
+- **Icon state**: two runtime-drawn icons; bright = something
+  hidden, dim = nothing hidden; NIM_MODIFY swaps icon + tooltip
+  together.
+- **Per-window restore**: per-session submenu; window ids encode
+  (session, window) as ID_WIN_BASE + s*32 + w (31 windows per
+  session shown), hidden windows carry MF_CHECKED; dispatch
+  checks the window range before hide/restore ranges.
+- **Restart as administrator**: releases the single-instance
+  mutex, ShellExecuteW "runas", exits on success; on decline it
+  re-acquires the mutex and stays.
+- **Scripting**: `list --json` (the store format is the JSON),
+  wildcard `*` matching (pure, in platform) for hide/restore,
+  `doctor` health report, export/import (import keeps a .bak),
+  portable mode via `portable.txt` next to the exe
+  (session::data_dir).
+
+Deferred honestly: per-argument quoting in the Settings
+"Arguments" field (it splits on whitespace), DPI scaling of the
+Settings window, and a separate GUI-subsystem binary.
+
 ## Landed in v0.3 (2026-10-24)
 
 - "Hide a running program" tray submenu (visible-window process
