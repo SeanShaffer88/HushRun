@@ -12,14 +12,45 @@ mod imp;
 mod imp;
 
 pub use imp::{
-    find_process_by_name, is_window_visible, launch_hidden, process_alive, set_window_visible,
-    windows_of,
+    all_processes, find_process_by_name, is_window_visible, launch_hidden, process_alive,
+    set_window_visible, windows_of,
 };
 
 // Used by the tray (Windows-only); on other platforms only the
 // seam's completeness needs them.
 #[cfg_attr(not(windows), allow(unused_imports))]
-pub use imp::{exe_name, foreground_window, own_pid, visible_apps, window_pid};
+pub use imp::{
+    exe_name, foreground_window, own_pid, set_autostart, visible_apps, window_pid, window_title,
+};
+
+/// Case-insensitive wildcard match where `*` matches any run of
+/// characters (including none) — the bulk hide/restore pattern
+/// language. Pure — tested on every platform.
+pub fn wildcard_match(pattern: &str, text: &str) -> bool {
+    let p: Vec<char> = pattern.chars().collect();
+    let t: Vec<char> = text.chars().collect();
+    wildcard_at(&p, &t)
+}
+
+fn wildcard_at(pattern: &[char], text: &[char]) -> bool {
+    if pattern.is_empty() {
+        return text.is_empty();
+    }
+    if pattern[0] == '*' {
+        // Collapse runs of stars; a trailing star matches all.
+        let rest = &pattern[pattern.iter().take_while(|&&c| c == '*').count()..];
+        if rest.is_empty() {
+            return true;
+        }
+        return (0..=text.len()).any(|i| wildcard_at(rest, &text[i..]));
+    }
+    if text.is_empty() {
+        return false;
+    }
+    let same = pattern[0].eq_ignore_ascii_case(&text[0])
+        || (pattern[0] as u32 > 127 && pattern[0].to_lowercase().eq(text[0].to_lowercase()));
+    same && wildcard_at(&pattern[1..], &text[1..])
+}
 
 /// Build a Windows-style command line from a program and its
 /// arguments, applying the standard quoting rules (an argument is
@@ -92,5 +123,18 @@ mod tests {
         assert_eq!(quote_arg("say \"hi\""), "\"say \\\"hi\\\"\"");
         assert_eq!(quote_arg("C:\\dir\\"), "\"C:\\dir\\\\\"");
         assert_eq!(quote_arg(""), "\"\"");
+    }
+
+    #[test]
+    fn wildcards() {
+        assert!(wildcard_match("chrome*", "chrome.exe"));
+        assert!(wildcard_match("*", "anything"));
+        assert!(wildcard_match("note*", "Notepad.exe"));
+        assert!(wildcard_match("*pad*", "notepad.exe"));
+        assert!(wildcard_match("exact", "exact"));
+        assert!(!wildcard_match("chrome*", "firefox.exe"));
+        assert!(!wildcard_match("note", "notepad.exe"));
+        assert!(!wildcard_match("", "x"));
+        assert!(wildcard_match("", ""));
     }
 }
