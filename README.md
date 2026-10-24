@@ -26,12 +26,25 @@ hushrun            (or: hushrun tray)
 ```
 
 Starts the tray icon. Its menu lists the programs currently
-hidden (click one to bring it back), offers **Restore all**,
-**Run a program hidden…** (pick an .exe), and **Exit**, which
-restores everything before quitting. While the tray is running
-it watches hidden programs continuously, so a window one of them
-opens later is tucked away too. The tray and the command line
-share the same session list.
+hidden (click one to bring it back), offers **Restore all**, a
+**Hide a running program** submenu (every app with a visible
+window — pick one to hide it), **Run a program hidden…** (pick
+an .exe), and **Exit**, which restores everything before
+quitting. While the tray is running it watches hidden programs
+continuously, so a window one of them opens later is tucked
+away too. The tray and the command line share the same session
+list.
+
+Two global hotkeys work while the tray runs: **Ctrl+Alt+H**
+hides the program in the foreground window, and **Ctrl+Alt+U**
+restores everything. (If another app already owns a combo, that
+hotkey just doesn't register; the menu is unaffected.)
+
+Small kindnesses built in: you get a quiet balloon when a
+program is hidden, restored, or exits while hidden; if the tray
+is killed or the PC loses power, the next launch offers to
+restore whatever was left hidden; and if Explorer restarts, the
+icon puts itself back.
 
 ### Command line
 
@@ -88,13 +101,15 @@ unverified).
 
 ## Status
 
-v0.2.0 — tray mode added on top of the 0.1.0 command-line core:
-tray icon with a restore menu, a run-hidden file picker,
-continuous watching while resident, and restore-all on exit.
-Logic is unit-tested in CI; behavior on a real Windows desktop is
+v0.3.0 — the tray grows up: hide already-running programs from
+its menu, Ctrl+Alt+H / Ctrl+Alt+U hotkeys, unclean-exit and
+Explorer-restart recovery, and balloons for hide/restore/exit
+events, on top of the 0.2.0 tray and 0.1.0 CLI core. Logic is
+unit-tested in CI; behavior on a real Windows desktop is
 **unverified** until the on-machine check (run Notepad hidden,
 confirm no window or taskbar button, restore it; then the same
-through the tray menu) has been run. See `docs/PLAN.md`.
+through the tray menu and hotkeys) has been run. See
+`docs/PLAN.md`.
 
 ## License
 
