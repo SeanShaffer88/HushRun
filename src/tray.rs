@@ -13,6 +13,47 @@ pub fn run() -> Result<String, String> {
     Err("the HushRun tray is only available on Windows".to_string())
 }
 
+/// Menu text for one entry in the "hide a running program" list:
+/// the window title, with the executable name appended when it
+/// adds information, capped so the menu stays a sane width.
+/// Pure — tested on every platform.
+// Used by the tray's Windows module; elsewhere only tests call it.
+#[cfg_attr(not(windows), allow(dead_code))]
+pub fn menu_label(title: &str, exe: &str) -> String {
+    let mut label = if exe.is_empty() || title.eq_ignore_ascii_case(exe) {
+        title.to_string()
+    } else {
+        format!("{title} — {exe}")
+    };
+    if label.chars().count() > 56 {
+        label = label.chars().take(55).collect::<String>() + "\u{2026}";
+    }
+    label
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn labels_combine_title_and_exe() {
+        assert_eq!(
+            menu_label("Quarterly report - Editor", "editor.exe"),
+            "Quarterly report - Editor — editor.exe"
+        );
+        assert_eq!(menu_label("editor.exe", "editor.exe"), "editor.exe");
+        assert_eq!(menu_label("Just a title", ""), "Just a title");
+    }
+
+    #[test]
+    fn labels_are_capped() {
+        let long = "x".repeat(80);
+        let label = menu_label(&long, "app.exe");
+        assert_eq!(label.chars().count(), 56);
+        assert!(label.ends_with('\u{2026}'));
+    }
+}
+
 #[cfg(windows)]
 pub fn run() -> Result<String, String> {
     windows::run()
@@ -34,6 +75,7 @@ mod windows {
     const WM_DESTROY: u32 = 0x0002;
     const WM_TIMER: u32 = 0x0113;
     const WM_NULL: u32 = 0x0000;
+    const WM_HOTKEY: u32 = 0x0312;
     const TRAY_MSG: u32 = 0x8000 + 1; // WM_APP + 1
     const WM_LBUTTONUP: u32 = 0x0202;
     const WM_LBUTTONDBLCLK: u32 = 0x0203;
@@ -45,11 +87,15 @@ mod windows {
     const NIF_MESSAGE: u32 = 0x1;
     const NIF_ICON: u32 = 0x2;
     const NIF_TIP: u32 = 0x4;
+    const NIF_INFO: u32 = 0x10;
+    const NIIF_INFO: u32 = 0x1;
+    const NIIF_WARNING: u32 = 0x2;
 
     const MF_STRING: u32 = 0x0000;
     const MF_GRAYED: u32 = 0x0001;
     const MF_DISABLED: u32 = 0x0002;
     const MF_SEPARATOR: u32 = 0x0800;
+    const MF_POPUP: u32 = 0x0010;
     const TPM_RETURNCMD: u32 = 0x0100;
     const TPM_RIGHTBUTTON: u32 = 0x0002;
 
@@ -57,13 +103,25 @@ mod windows {
     const ID_RUN: u32 = 2000;
     const ID_RESTORE_ALL: u32 = 2001;
     const ID_EXIT: u32 = 2002;
+    const ID_HIDE_BASE: u32 = 3000;
+
+    const MOD_ALT: u32 = 0x0001;
+    const MOD_CONTROL: u32 = 0x0002;
+    const MOD_NOREPEAT: u32 = 0x4000;
+    const HOTKEY_HIDE: i32 = 1;
+    const HOTKEY_RESTORE: i32 = 2;
+    const VK_H: u32 = 0x48;
+    const VK_U: u32 = 0x55;
 
     const OFN_PATHMUSTEXIST: u32 = 0x0800;
     const OFN_FILEMUSTEXIST: u32 = 0x1000;
     const ERROR_ALREADY_EXISTS: u32 = 183;
     const MB_OK: u32 = 0x0;
+    const MB_YESNO: u32 = 0x4;
     const MB_ICONINFORMATION: u32 = 0x40;
     const MB_ICONERROR: u32 = 0x10;
+    const MB_ICONQUESTION: u32 = 0x20;
+    const IDYES: i32 = 6;
 
     #[repr(C)]
     struct Point {
@@ -204,6 +262,9 @@ mod windows {
         fn CreateIconIndirect(info: *const IconInfo) -> *mut c_void;
         fn DestroyIcon(icon: *mut c_void) -> i32;
         fn MessageBoxW(hwnd: Hwnd, text: *const u16, caption: *const u16, kind: u32) -> i32;
+        fn RegisterHotKey(hwnd: Hwnd, id: i32, modifiers: u32, vk: u32) -> i32;
+        fn UnregisterHotKey(hwnd: Hwnd, id: i32) -> i32;
+        fn RegisterWindowMessageW(name: *const u16) -> u32;
     }
 
     #[link(name = "shell32")]
@@ -236,7 +297,10 @@ mod windows {
         hwnd: Hwnd,
         icon: *mut c_void,
         menu_sessions: Vec<Session>,
+        menu_hide: Vec<(u32, String)>,
         tip_count: usize,
+        taskbar_msg: u32,
+        first_tick_done: bool,
     }
 
     thread_local! {
@@ -244,7 +308,10 @@ mod windows {
             hwnd: std::ptr::null_mut(),
             icon: std::ptr::null_mut(),
             menu_sessions: Vec::new(),
+            menu_hide: Vec::new(),
             tip_count: usize::MAX,
+            taskbar_msg: 0,
+            first_tick_done: false,
         }) };
     }
 
@@ -277,6 +344,29 @@ mod windows {
         nid
     }
 
+    /// A quiet balloon/toast from the tray icon. Used for the
+    /// events the user caused or would want to know about: a
+    /// program hidden, restored, or exiting while hidden.
+    fn balloon(hwnd: Hwnd, icon: *mut c_void, text: &str, warning: bool) {
+        let mut nid = nid_base(hwnd, icon);
+        nid.u_flags = NIF_INFO;
+        let title = wide("HushRun");
+        let body = wide(text);
+        let tlen = title.len().min(63);
+        nid.sz_info_title[..tlen].copy_from_slice(&title[..tlen]);
+        let blen = body.len().min(255);
+        nid.sz_info[..blen].copy_from_slice(&body[..blen]);
+        nid.dw_info_flags = if warning { NIIF_WARNING } else { NIIF_INFO };
+        unsafe { Shell_NotifyIconW(NIM_MODIFY, &nid) };
+    }
+
+    fn balloon_from_state(hwnd: Hwnd, text: &str, warning: bool) {
+        let icon = STATE.with(|st| st.borrow().icon);
+        if !icon.is_null() {
+            balloon(hwnd, icon, text, warning);
+        }
+    }
+
     fn set_tip(hwnd: Hwnd, icon: *mut c_void, count: usize) {
         let mut nid = nid_base(hwnd, icon);
         nid.u_flags = NIF_TIP;
@@ -304,9 +394,11 @@ mod windows {
         let mut sessions = session::load(&path);
         let mut changed = false;
         let mut live = Vec::new();
+        let mut died: Vec<String> = Vec::new();
         for mut s in sessions.drain(..) {
             if !platform::process_alive(s.pid) {
                 changed = true;
+                died.push(display_name(&s.program));
                 continue;
             }
             for w in platform::windows_of(s.pid) {
@@ -321,37 +413,135 @@ mod windows {
             let _ = session::save(&path, &live);
         }
         let count = live.len();
-        let icon = STATE.with(|st| {
+        let (icon, first) = STATE.with(|st| {
             let mut st = st.borrow_mut();
+            let first = !st.first_tick_done;
+            st.first_tick_done = true;
             if st.tip_count != count {
                 st.tip_count = count;
-                return st.icon;
+                return (st.icon, first);
             }
-            std::ptr::null_mut()
+            (std::ptr::null_mut(), first)
         });
         if !icon.is_null() {
             set_tip(hwnd, icon, count);
         }
+        // Programs that exited while hidden are worth one balloon —
+        // but not for sessions that were already dead when the tray
+        // started (the first tick just cleans those up).
+        if !first && !died.is_empty() {
+            let text = if died.len() == 1 {
+                format!("{} exited while hidden", died[0])
+            } else {
+                format!("{} programs exited while hidden", died.len())
+            };
+            balloon_from_state(hwnd, &text, false);
+        }
     }
 
-    fn restore_session(s: &Session) {
+    fn upsert_session(pid: u32, program: &str, windows_hidden: u32) {
+        let path = session::store_path();
+        let mut sessions = session::load(&path);
+        if let Some(s) = sessions.iter_mut().find(|s| s.pid == pid) {
+            s.windows_hidden += windows_hidden;
+        } else {
+            sessions.push(Session {
+                pid,
+                program: program.to_string(),
+                args: Vec::new(),
+                started_unix: app::now_unix(),
+                windows_hidden,
+            });
+        }
+        let _ = session::save(&path, &sessions);
+    }
+
+    /// Hide every visible window of a process and record it — the
+    /// shared action behind the menu's "hide a running program"
+    /// list and the Ctrl+Alt+H hotkey.
+    fn hide_process(hwnd: Hwnd, pid: u32, program: &str) {
+        let mut hidden = 0usize;
+        for w in platform::windows_of(pid) {
+            if platform::is_window_visible(w) && platform::set_window_visible(w, false) {
+                hidden += 1;
+            }
+        }
+        let name = display_name(program);
+        if hidden > 0 {
+            upsert_session(pid, program, hidden as u32);
+            balloon_from_state(hwnd, &format!("{name} is now hidden"), false);
+        } else {
+            balloon_from_state(hwnd, &format!("No visible window found for {name}"), true);
+        }
+        tick(hwnd);
+    }
+
+    fn hide_foreground(hwnd: Hwnd) {
+        let Some(hwnd_fg) = platform::foreground_window() else {
+            return;
+        };
+        let Some(pid) = platform::window_pid(hwnd_fg) else {
+            return;
+        };
+        if pid == platform::own_pid() {
+            return;
+        }
+        let program = platform::exe_name(pid).unwrap_or_else(|| format!("pid {pid}"));
+        hide_process(hwnd, pid, &program);
+    }
+
+    fn restore_session(hwnd: Hwnd, s: &Session) {
         app::show_all(s.pid);
         let path = session::store_path();
         let mut sessions = session::load(&path);
         sessions.retain(|x| x.pid != s.pid);
         let _ = session::save(&path, &sessions);
+        balloon_from_state(
+            hwnd,
+            &format!("{} restored", display_name(&s.program)),
+            false,
+        );
+        tick(hwnd);
     }
 
-    fn restore_everything() {
-        for s in live_sessions() {
+    fn restore_everything() -> usize {
+        let sessions = live_sessions();
+        let count = sessions.len();
+        for s in &sessions {
             app::show_all(s.pid);
         }
         let _ = session::save(&session::store_path(), &[]);
+        count
     }
 
     fn show_menu(hwnd: Hwnd) {
         let sessions = live_sessions();
-        STATE.with(|st| st.borrow_mut().menu_sessions = sessions.clone());
+        let own = platform::own_pid();
+        let hide_targets: Vec<(u32, String, String)> = platform::visible_apps()
+            .into_iter()
+            .filter(|(pid, _)| *pid != own && !sessions.iter().any(|s| s.pid == *pid))
+            .map(|(pid, title)| {
+                let exe = platform::exe_name(pid).unwrap_or_default();
+                (pid, title, exe)
+            })
+            .collect();
+        STATE.with(|st| {
+            let mut st = st.borrow_mut();
+            st.menu_sessions = sessions.clone();
+            st.menu_hide = hide_targets
+                .iter()
+                .map(|(pid, title, exe)| {
+                    (
+                        *pid,
+                        if exe.is_empty() {
+                            title.clone()
+                        } else {
+                            exe.clone()
+                        },
+                    )
+                })
+                .collect();
+        });
         let menu = unsafe { CreatePopupMenu() };
         if menu.is_null() {
             return;
@@ -377,9 +567,30 @@ mod windows {
             append(MF_STRING, ID_RESTORE_ALL as usize, "Restore all");
             append(MF_SEPARATOR, 0, "");
         }
+        // "Hide a running program" submenu.
+        let sub = unsafe { CreatePopupMenu() };
+        if !sub.is_null() {
+            if hide_targets.is_empty() {
+                let w = wide("(no visible programs)");
+                unsafe { AppendMenuW(sub, MF_STRING | MF_GRAYED | MF_DISABLED, 0, w.as_ptr()) };
+            } else {
+                for (i, (_, title, exe)) in hide_targets.iter().enumerate() {
+                    let w = wide(&crate::tray::menu_label(title, exe));
+                    unsafe { AppendMenuW(sub, MF_STRING, (ID_HIDE_BASE as usize) + i, w.as_ptr()) };
+                }
+            }
+            let w = wide("Hide a running program");
+            unsafe { AppendMenuW(menu, MF_POPUP, sub as usize, w.as_ptr()) };
+        }
         append(MF_STRING, ID_RUN as usize, "Run a program hidden\u{2026}");
         append(MF_SEPARATOR, 0, "");
         append(MF_STRING, ID_EXIT as usize, "Exit (restore all)");
+        append(MF_SEPARATOR, 0, "");
+        append(
+            MF_STRING | MF_GRAYED | MF_DISABLED,
+            0,
+            "Hotkeys: Ctrl+Alt+H hide window \u{b7} Ctrl+Alt+U restore all",
+        );
 
         let mut pt = Point { x: 0, y: 0 };
         unsafe {
@@ -406,13 +617,25 @@ mod windows {
                 restore_everything();
                 unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
             }
-            ID_RESTORE_ALL => restore_everything(),
+            ID_RESTORE_ALL => {
+                if restore_everything() > 0 {
+                    balloon_from_state(hwnd, "All programs restored", false);
+                }
+                tick(hwnd);
+            }
             ID_RUN => pick_and_run(hwnd),
+            id if id >= ID_HIDE_BASE => {
+                let idx = (id - ID_HIDE_BASE) as usize;
+                let target = STATE.with(|st| st.borrow().menu_hide.get(idx).cloned());
+                if let Some((pid, program)) = target {
+                    hide_process(hwnd, pid, &program);
+                }
+            }
             id if id >= ID_RESTORE_BASE => {
                 let idx = (id - ID_RESTORE_BASE) as usize;
                 let target = STATE.with(|st| st.borrow().menu_sessions.get(idx).cloned());
                 if let Some(s) = target {
-                    restore_session(&s);
+                    restore_session(hwnd, &s);
                 }
             }
             _ => {}
@@ -450,17 +673,9 @@ mod windows {
                 return;
             }
         };
-        let store = session::store_path();
-        let mut sessions = session::load(&store);
-        sessions.retain(|s| s.pid != pid);
-        sessions.push(Session {
-            pid,
-            program: path,
-            args: Vec::new(),
-            started_unix: app::now_unix(),
-            windows_hidden: 0,
-        });
-        let _ = session::save(&store, &sessions);
+        let name = display_name(&path);
+        upsert_session(pid, &path, 0);
+        balloon_from_state(hwnd, &format!("Started {name} hidden"), false);
         std::thread::spawn(move || {
             let hidden = app::watch_hide(pid, 15);
             let store = session::store_path();
@@ -470,6 +685,7 @@ mod windows {
                 let _ = session::save(&store, &sessions);
             }
         });
+        tick(hwnd);
     }
 
     /// The tray icon: a near-black rounded square with a red border
@@ -531,11 +747,52 @@ mod windows {
         }
     }
 
+    /// Re-add the icon after Explorer restarts (its message is
+    /// registered at startup, so the value is dynamic).
+    fn re_add_icon(hwnd: Hwnd) {
+        let (icon, count) = STATE.with(|st| {
+            let st = st.borrow();
+            (st.icon, st.tip_count)
+        });
+        if icon.is_null() {
+            return;
+        }
+        let count = if count == usize::MAX {
+            live_sessions().len()
+        } else {
+            count
+        };
+        let mut nid = nid_base(hwnd, icon);
+        nid.u_flags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+        nid.u_callback_message = TRAY_MSG;
+        let tip = wide(&tip_text(count));
+        nid.sz_tip[..tip.len()].copy_from_slice(&tip);
+        unsafe { Shell_NotifyIconW(NIM_ADD, &nid) };
+    }
+
     unsafe extern "system" fn wnd_proc(hwnd: Hwnd, msg: u32, w: usize, l: isize) -> isize {
+        let taskbar_msg = STATE.with(|st| st.borrow().taskbar_msg);
+        if taskbar_msg != 0 && msg == taskbar_msg {
+            re_add_icon(hwnd);
+            return 0;
+        }
         match msg {
             TRAY_MSG => {
                 if matches!(l as u32, WM_RBUTTONUP | WM_LBUTTONUP | WM_LBUTTONDBLCLK) {
                     show_menu(hwnd);
+                }
+                0
+            }
+            WM_HOTKEY => {
+                match w as i32 {
+                    HOTKEY_HIDE => hide_foreground(hwnd),
+                    HOTKEY_RESTORE => {
+                        if restore_everything() > 0 {
+                            balloon_from_state(hwnd, "All programs restored", false);
+                        }
+                        tick(hwnd);
+                    }
+                    _ => {}
                 }
                 0
             }
@@ -551,6 +808,8 @@ mod windows {
                 let mut nid = nid_base(hwnd, std::ptr::null_mut());
                 nid.u_flags = 0;
                 unsafe {
+                    UnregisterHotKey(hwnd, HOTKEY_HIDE);
+                    UnregisterHotKey(hwnd, HOTKEY_RESTORE);
                     Shell_NotifyIconW(NIM_DELETE, &nid);
                     PostQuitMessage(0);
                 }
@@ -577,6 +836,37 @@ mod windows {
                 );
                 return Ok("HushRun tray is already running.".to_string());
             }
+
+            // Unclean-exit recovery: a leftover marker file means
+            // the previous tray never shut down cleanly (crash,
+            // kill, power loss). Offer to restore whatever it left
+            // hidden before this instance settles in.
+            let marker = session::store_path().with_file_name("tray.running");
+            if marker.exists() {
+                let leftover = session::load(&session::store_path());
+                if !leftover.is_empty() {
+                    let text = wide(&format!(
+                        "HushRun didn't shut down cleanly last time, and {} program(s) were left hidden. Restore them now?",
+                        leftover.len()
+                    ));
+                    let caption = wide("HushRun");
+                    let answer = MessageBoxW(
+                        std::ptr::null_mut(),
+                        text.as_ptr(),
+                        caption.as_ptr(),
+                        MB_YESNO | MB_ICONQUESTION,
+                    );
+                    if answer == IDYES {
+                        for s in &leftover {
+                            if platform::process_alive(s.pid) {
+                                app::show_all(s.pid);
+                            }
+                        }
+                        let _ = session::save(&session::store_path(), &[]);
+                    }
+                }
+            }
+            let _ = std::fs::write(&marker, b"running\n");
 
             let instance = GetModuleHandleW(std::ptr::null());
             let icon = create_app_icon();
@@ -617,10 +907,13 @@ mod windows {
                     GetLastError()
                 ));
             }
+            let taskbar_name = wide("TaskbarCreated");
+            let taskbar_msg = RegisterWindowMessageW(taskbar_name.as_ptr());
             STATE.with(|st| {
                 let mut st = st.borrow_mut();
                 st.hwnd = hwnd;
                 st.icon = icon;
+                st.taskbar_msg = taskbar_msg;
             });
 
             let mut nid = nid_base(hwnd, icon);
@@ -632,6 +925,20 @@ mod windows {
                 return Err("could not add the tray icon".to_string());
             }
             SetTimer(hwnd, 1, 1000, std::ptr::null_mut());
+            // Global hotkeys. If another app already owns a combo,
+            // registration simply fails and the menu still works.
+            RegisterHotKey(
+                hwnd,
+                HOTKEY_HIDE,
+                MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                VK_H,
+            );
+            RegisterHotKey(
+                hwnd,
+                HOTKEY_RESTORE,
+                MOD_CONTROL | MOD_ALT | MOD_NOREPEAT,
+                VK_U,
+            );
             tick(hwnd);
 
             let mut msg: Msg = std::mem::zeroed();
@@ -643,6 +950,9 @@ mod windows {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
+            // Clean exit: clear the marker so the next launch
+            // doesn't offer the recovery prompt.
+            let _ = std::fs::remove_file(&marker);
             DestroyIcon(icon);
             if !mutex.is_null() {
                 CloseHandle(mutex);
