@@ -24,3 +24,30 @@ pub fn process_alive(_pid: u32) -> bool {
 pub fn find_process_by_name(_name: &str) -> Option<(u32, String)> {
     None
 }
+
+// The next five serve the Windows tray; here they exist so the
+// seam is complete on every platform.
+#[allow(dead_code)]
+pub fn visible_apps() -> Vec<(u32, String)> {
+    Vec::new()
+}
+
+#[allow(dead_code)]
+pub fn foreground_window() -> Option<isize> {
+    None
+}
+
+#[allow(dead_code)]
+pub fn window_pid(_hwnd: isize) -> Option<u32> {
+    None
+}
+
+#[allow(dead_code)]
+pub fn own_pid() -> u32 {
+    std::process::id()
+}
+
+#[allow(dead_code)]
+pub fn exe_name(_pid: u32) -> Option<String> {
+    None
+}
