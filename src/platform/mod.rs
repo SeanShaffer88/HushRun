@@ -16,6 +16,11 @@ pub use imp::{
     windows_of,
 };
 
+// Used by the tray (Windows-only); on other platforms only the
+// seam's completeness needs them.
+#[cfg_attr(not(windows), allow(unused_imports))]
+pub use imp::{exe_name, foreground_window, own_pid, visible_apps, window_pid};
+
 /// Build a Windows-style command line from a program and its
 /// arguments, applying the standard quoting rules (an argument is
 /// quoted when it is empty or contains a space or a quote;
