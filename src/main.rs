@@ -1,5 +1,7 @@
 mod app;
 mod cli;
+mod config;
+mod json;
 mod platform;
 mod session;
 mod tray;
