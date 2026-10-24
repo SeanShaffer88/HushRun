@@ -84,6 +84,9 @@ extern "system" {
     fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     fn ShowWindow(hwnd: Hwnd, cmd: i32) -> Bool;
     fn IsWindowVisible(hwnd: Hwnd) -> Bool;
+    fn GetWindowTextW(hwnd: Hwnd, text: *mut u16, max: i32) -> i32;
+    fn GetForegroundWindow() -> Hwnd;
+    fn GetCurrentProcessId() -> u32;
     fn CreateToolhelp32Snapshot(flags: u32, pid: u32) -> Handle;
     fn Process32FirstW(h: Handle, entry: *mut ProcessEntry32W) -> Bool;
     fn Process32NextW(h: Handle, entry: *mut ProcessEntry32W) -> Bool;
@@ -174,6 +177,98 @@ pub fn process_alive(pid: u32) -> bool {
         let ok = GetExitCodeProcess(handle, &mut code);
         CloseHandle(handle);
         ok != 0 && code == STILL_ACTIVE
+    }
+}
+
+struct AppsState {
+    apps: Vec<(u32, String)>,
+}
+
+extern "system" fn apps_cb(hwnd: Hwnd, param: isize) -> Bool {
+    let state = unsafe { &mut *(param as *mut AppsState) };
+    unsafe {
+        if IsWindowVisible(hwnd) == 0 {
+            return 1;
+        }
+        let mut buf = [0u16; 512];
+        let len = GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32);
+        if len <= 0 {
+            return 1;
+        }
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid != 0 && !state.apps.iter().any(|(p, _)| *p == pid) {
+            let title = String::from_utf16_lossy(&buf[..len as usize]);
+            state.apps.push((pid, title));
+        }
+    }
+    1
+}
+
+/// Processes that currently own at least one visible, titled
+/// top-level window — `(pid, window title)`, one entry per
+/// process, in enumeration order. The tray's "hide a running
+/// program" list and the foreground-hide hotkey are built on it.
+pub fn visible_apps() -> Vec<(u32, String)> {
+    let mut state = AppsState { apps: Vec::new() };
+    unsafe {
+        EnumWindows(apps_cb, &mut state as *mut AppsState as isize);
+    }
+    state.apps
+}
+
+pub fn foreground_window() -> Option<isize> {
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.is_null() {
+        None
+    } else {
+        Some(hwnd as isize)
+    }
+}
+
+pub fn window_pid(hwnd: isize) -> Option<u32> {
+    let mut pid: u32 = 0;
+    unsafe { GetWindowThreadProcessId(hwnd as Hwnd, &mut pid) };
+    if pid == 0 {
+        None
+    } else {
+        Some(pid)
+    }
+}
+
+pub fn own_pid() -> u32 {
+    unsafe { GetCurrentProcessId() }
+}
+
+/// The executable file name of a running process, if the process
+/// list can see it.
+pub fn exe_name(pid: u32) -> Option<String> {
+    unsafe {
+        let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if snapshot.is_null() || snapshot as isize == -1 {
+            return None;
+        }
+        let mut entry: ProcessEntry32W = std::mem::zeroed();
+        entry.dw_size = std::mem::size_of::<ProcessEntry32W>() as u32;
+        let mut found = None;
+        if Process32FirstW(snapshot, &mut entry) != 0 {
+            loop {
+                if entry.th32_process_id == pid {
+                    let len = entry
+                        .sz_exe_file
+                        .iter()
+                        .position(|&c| c == 0)
+                        .unwrap_or(MAX_PATH);
+                    found = Some(String::from_utf16_lossy(&entry.sz_exe_file[..len]));
+                    break;
+                }
+                if Process32NextW(snapshot, &mut entry) == 0 {
+                    break;
+                }
+            }
+        }
+        CloseHandle(snapshot);
+        found
     }
 }
 
