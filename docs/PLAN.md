@@ -46,6 +46,24 @@ it yet).
   touches the target process's memory; it only asks the window
   manager to hide/show top-level windows it owns.
 
+## Landed in v0.3 (2026-10-24)
+
+- "Hide a running program" tray submenu (visible-window process
+  enumeration in the platform layer: EnumWindows + GetWindowTextW,
+  deduped by pid, own process and already-hidden excluded).
+- Global hotkeys via RegisterHotKey: Ctrl+Alt+H hides the
+  foreground window's program (GetForegroundWindow →
+  GetWindowThreadProcessId), Ctrl+Alt+U restores all. MOD_NOREPEAT;
+  registration failure is non-fatal by design.
+- Unclean-exit recovery: a `tray.running` marker written at tray
+  start and removed on clean exit; a leftover marker + non-empty
+  session store triggers a Yes/No restore offer at next launch.
+- Explorer-restart recovery: the registered `TaskbarCreated`
+  message re-adds the icon with the current tooltip.
+- Balloons (NIF_INFO) for tray-caused hide/restore events and for
+  a hidden program exiting (suppressed on the first tick, which
+  is just startup cleanup).
+
 ## Landed in v0.2 (2026-10-24)
 
 - Resident tray mode (`hushrun tray`, or no arguments): message-
