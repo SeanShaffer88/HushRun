@@ -107,6 +107,15 @@ itself has exited.
 
 ## Honest limits
 
+- Hidden launch still starts the child before session registration.
+  A crash or registration failure in that gap can leave an untracked
+  hidden child. Closing this startup gap remains backlog work;
+  this is not a fully crash-safe launch transaction.
+- Concurrent HushRun instances must use the gated-store version.
+  Older binaries do not honor its session lock or operation receipts.
+- Restore failures retain a recoverable `Restoring` session and stop
+  automatic hiding for that operation. Retry restore after resolving
+  the reported error; partial window restore also stops that operation's hiding.
 - A program running elevated (as administrator) can only be
   hidden by an equally elevated HushRun — that's a Windows rule,
   not a HushRun choice.
