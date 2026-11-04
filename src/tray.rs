@@ -327,12 +327,12 @@ mod windows {
         icon_off: *mut c_void,
         mutex: *mut c_void,
         menu_sessions: Vec<Session>,
-        menu_hide: Vec<(u32, String)>,
+        menu_hide: Vec<(u32, String, Option<u64>)>,
+        identity_warnings: Vec<(u32, Option<u64>)>,
         menu_windows: Vec<Vec<isize>>,
         settings_hwnd: Hwnd,
         tip_count: usize,
         taskbar_msg: u32,
-        first_tick_done: bool,
     }
 
     thread_local! {
@@ -344,11 +344,11 @@ mod windows {
             mutex: std::ptr::null_mut(),
             menu_sessions: Vec::new(),
             menu_hide: Vec::new(),
+            identity_warnings: Vec::new(),
             menu_windows: Vec::new(),
             settings_hwnd: std::ptr::null_mut(),
             tip_count: usize::MAX,
             taskbar_msg: 0,
-            first_tick_done: false,
         }) };
     }
 
@@ -433,93 +433,64 @@ mod windows {
     /// Load the store, drop sessions whose process exited, and
     /// return the live ones. Saves when anything was pruned.
     fn live_sessions() -> Vec<Session> {
-        let path = session::store_path();
-        let mut sessions = session::load(&path);
-        let before = sessions.len();
-        sessions.retain(|s| platform::process_alive(s.pid));
-        if sessions.len() != before {
-            let _ = session::save(&path, &sessions);
+        session::load(&session::store_path())
+    }
+
+    fn identity_error(hwnd: Hwnd, pid: u32, identity: Option<u64>, message: &str) {
+        let first = STATE.with(|st| {
+            let mut st = st.borrow_mut();
+            let key = (pid, identity);
+            if st.identity_warnings.contains(&key) {
+                return false;
+            }
+            st.identity_warnings.push(key);
+            true
+        });
+        if first {
+            info_box(hwnd, &format!("pid {pid}: {message}"), true);
         }
-        sessions
     }
 
     fn tick(hwnd: Hwnd) {
-        let path = session::store_path();
-        let mut sessions = session::load(&path);
-        let mut changed = false;
-        let mut live = Vec::new();
-        let mut died: Vec<String> = Vec::new();
-        for mut s in sessions.drain(..) {
-            if !platform::process_alive(s.pid) {
-                changed = true;
-                died.push(display_name(&s.program));
+        let sessions = match session::load_strict(&session::store_path()) {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                identity_error(hwnd, 0, None, &e);
+                return;
+            }
+        };
+        for s in &sessions {
+            if s.state == session::State::Restoring {
                 continue;
             }
-            for w in platform::windows_of(s.pid) {
-                if platform::is_window_visible(w) && platform::set_window_visible(w, false) {
-                    s.windows_hidden += 1;
-                    changed = true;
-                }
-            }
-            live.push(s);
-        }
-        if changed {
-            let _ = session::save(&path, &live);
-        }
-        let count = live.len();
-        let first = STATE.with(|st| {
-            let mut st = st.borrow_mut();
-            let first = !st.first_tick_done;
-            st.first_tick_done = true;
-            first
-        });
-        refresh_indicator(hwnd, count);
-        // Programs that exited while hidden are worth one balloon —
-        // but not for sessions that were already dead when the tray
-        // started (the first tick just cleans those up).
-        if !first && !died.is_empty() {
-            let text = if died.len() == 1 {
-                format!("{} exited while hidden", died[0])
+            let result = if s.receipt.is_none() {
+                app::migrate_legacy(s)
             } else {
-                format!("{} programs exited while hidden", died.len())
+                Ok(s.clone())
             };
-            balloon_from_state(hwnd, &text, false);
+            if let Err(e) = result.and_then(|s| app::hide_step(&s, false)) {
+                identity_error(hwnd, s.pid, s.creation_filetime, &e);
+            }
         }
-    }
-
-    fn upsert_session(pid: u32, program: &str, windows_hidden: u32) {
-        let path = session::store_path();
-        let mut sessions = session::load(&path);
-        if let Some(s) = sessions.iter_mut().find(|s| s.pid == pid) {
-            s.windows_hidden += windows_hidden;
-        } else {
-            sessions.push(Session {
-                pid,
-                program: program.to_string(),
-                args: Vec::new(),
-                started_unix: app::now_unix(),
-                windows_hidden,
-            });
-        }
-        let _ = session::save(&path, &sessions);
+        refresh_indicator(hwnd, sessions.len());
     }
 
     /// Hide every visible window of a process and record it — the
     /// shared action behind the menu's "hide a running program"
     /// list and the Ctrl+Alt+H hotkey.
-    fn hide_process(hwnd: Hwnd, pid: u32, program: &str) {
-        let mut hidden = 0usize;
-        for w in platform::windows_of(pid) {
-            if platform::is_window_visible(w) && platform::set_window_visible(w, false) {
-                hidden += 1;
-            }
-        }
-        let name = display_name(program);
-        if hidden > 0 {
-            upsert_session(pid, program, hidden as u32);
-            balloon_from_state(hwnd, &format!("{name} is now hidden"), false);
-        } else {
-            balloon_from_state(hwnd, &format!("No visible window found for {name}"), true);
+    fn hide_process(hwnd: Hwnd, pid: u32, program: &str, expected: Option<u64>) {
+        let result = app::process_for_hide(pid).and_then(|process| {
+            platform::verify_identity(expected, process.creation_filetime, true)?;
+            let captured = app::begin_tracking(&process, program, &[])?;
+            app::watch_hide(&captured, 0)
+        });
+        match result {
+            Ok(hidden) => balloon_from_state(
+                hwnd,
+                &format!("{}: {hidden} window(s) hidden", display_name(program)),
+                false,
+            ),
+            Err(e) => info_box(hwnd, &e, true),
         }
         tick(hwnd);
     }
@@ -535,15 +506,17 @@ mod windows {
             return;
         }
         let program = platform::exe_name(pid).unwrap_or_else(|| format!("pid {pid}"));
-        hide_process(hwnd, pid, &program);
+        let identity = platform::Process::open(pid)
+            .ok()
+            .map(|p| p.creation_filetime);
+        hide_process(hwnd, pid, &program, identity);
     }
 
     fn restore_session(hwnd: Hwnd, s: &Session) {
-        app::show_all(s.pid);
-        let path = session::store_path();
-        let mut sessions = session::load(&path);
-        sessions.retain(|x| x.pid != s.pid);
-        let _ = session::save(&path, &sessions);
+        if let Err(e) = app::show_all(s) {
+            info_box(hwnd, &e, true);
+            return;
+        }
         balloon_from_state(
             hwnd,
             &format!("{} restored", display_name(&s.program)),
@@ -553,13 +526,28 @@ mod windows {
     }
 
     fn restore_everything() -> usize {
-        let sessions = live_sessions();
-        let count = sessions.len();
+        let sessions = match app::on_worker(|| {
+            session::Store::open(&session::store_path()).map(|store| store.sessions.clone())
+        }) {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                info_box(std::ptr::null_mut(), &e, true);
+                return 0;
+            }
+        };
+        let mut restored = 0;
+        let mut errors = Vec::new();
         for s in &sessions {
-            app::show_all(s.pid);
+            match app::show_all(s) {
+                Ok(_) => restored += 1,
+                Err(e) => errors.push(format!("pid {}: {e}", s.pid)),
+            }
         }
-        let _ = session::save(&session::store_path(), &[]);
-        count
+        if !errors.is_empty() {
+            let hwnd = STATE.with(|st| st.borrow().hwnd);
+            info_box(hwnd, &errors.join("\n"), true);
+        }
+        restored
     }
 
     fn show_menu(hwnd: Hwnd) {
@@ -578,7 +566,11 @@ mod windows {
             st.menu_sessions = sessions.clone();
             st.menu_windows = sessions
                 .iter()
-                .map(|s| platform::windows_of(s.pid))
+                .map(|s| {
+                    app::verified_session(s)
+                        .map(|p| platform::windows_of(p.pid))
+                        .unwrap_or_default()
+                })
                 .collect();
             st.menu_hide = hide_targets
                 .iter()
@@ -590,6 +582,9 @@ mod windows {
                         } else {
                             exe.clone()
                         },
+                        platform::Process::open(*pid)
+                            .ok()
+                            .map(|p| p.creation_filetime),
                     )
                 })
                 .collect();
@@ -709,6 +704,7 @@ mod windows {
         }
         match cmd {
             ID_EXIT => {
+                app::stop_background_tracking();
                 restore_everything();
                 unsafe { PostMessageW(hwnd, WM_CLOSE, 0, 0) };
             }
@@ -734,8 +730,8 @@ mod windows {
             id if id >= ID_HIDE_BASE => {
                 let idx = (id - ID_HIDE_BASE) as usize;
                 let target = STATE.with(|st| st.borrow().menu_hide.get(idx).cloned());
-                if let Some((pid, program)) = target {
-                    hide_process(hwnd, pid, &program);
+                if let Some((pid, program, identity)) = target {
+                    hide_process(hwnd, pid, &program, identity);
                 }
             }
             id if id >= ID_RESTORE_BASE => {
@@ -814,15 +810,9 @@ mod windows {
         let Some((session, hwnd_win)) = target else {
             return;
         };
-        platform::set_window_visible(hwnd_win, true);
-        let still_hidden = platform::windows_of(session.pid)
-            .iter()
-            .any(|w| !platform::is_window_visible(*w));
-        if !still_hidden {
-            let path = session::store_path();
-            let mut sessions = session::load(&path);
-            sessions.retain(|x| x.pid != session.pid);
-            let _ = session::save(&path, &sessions);
+        if let Err(e) = app::restore_tracked(&session, Some(hwnd_win)) {
+            info_box(hwnd, &e, true);
+            return;
         }
         balloon_from_state(
             hwnd,
@@ -921,80 +911,51 @@ mod windows {
         ) else {
             return;
         };
-        let pid = match platform::launch_hidden(&path, &[]) {
-            Ok(pid) => pid,
-            Err(message) => {
-                let text = wide(&message);
-                let caption = wide("HushRun");
-                unsafe { MessageBoxW(hwnd, text.as_ptr(), caption.as_ptr(), MB_OK | MB_ICONERROR) };
+        let captured = match app::launch_tracked(&path, &[]) {
+            Ok(captured) => captured,
+            Err(e) => {
+                info_box(hwnd, &e, true);
                 return;
             }
         };
-        let name = display_name(&path);
-        upsert_session(pid, &path, 0);
-        balloon_from_state(hwnd, &format!("Started {name} hidden"), false);
+        balloon_from_state(
+            hwnd,
+            &format!("Started {} hidden", display_name(&path)),
+            false,
+        );
         let watch = config::load(&config::config_path()).watch_seconds;
         std::thread::spawn(move || {
-            let hidden = app::watch_hide(pid, watch);
-            let store = session::store_path();
-            let mut sessions = session::load(&store);
-            if let Some(s) = sessions.iter_mut().find(|s| s.pid == pid) {
-                s.windows_hidden = hidden as u32;
-                let _ = session::save(&store, &sessions);
+            if let Err(e) = app::watch_hide(&captured, watch) {
+                info_box(std::ptr::null_mut(), &e, true);
             }
         });
         tick(hwnd);
     }
 
-    /// Sessions whose program exited while HushRun was away are
-    /// relaunched hidden when the program file is still there —
-    /// a reboot shouldn't lose what was tucked away.
+    /// Recover verified sessions, preserving records whose identity is unknown.
     fn relaunch_dead_sessions() {
-        let path = session::store_path();
         let cfg = config::load(&config::config_path());
-        let mut sessions = session::load(&path);
-        let mut relaunched = 0usize;
-        let mut kept = Vec::new();
-        for s in sessions.drain(..) {
-            if platform::process_alive(s.pid) {
-                kept.push(s);
-                continue;
+        let hwnd = STATE.with(|st| st.borrow().hwnd);
+        let sessions = match session::load_strict(&session::store_path()) {
+            Ok(sessions) => sessions,
+            Err(e) => {
+                info_box(hwnd, &e, true);
+                return;
             }
-            let launchable = (s.program.contains('\\') || s.program.contains('/'))
-                && std::path::Path::new(&s.program).is_file();
-            if launchable {
-                if let Ok(pid) = platform::launch_hidden(&s.program, &s.args) {
-                    kept.push(Session {
-                        pid,
-                        program: s.program.clone(),
-                        args: s.args.clone(),
-                        started_unix: app::now_unix(),
-                        windows_hidden: 0,
-                    });
-                    relaunched += 1;
+        };
+        for s in sessions {
+            match app::recover(&s) {
+                Ok(Some(captured)) => {
                     let watch = cfg.watch_seconds;
                     std::thread::spawn(move || {
-                        let hidden = app::watch_hide(pid, watch);
-                        let store = session::store_path();
-                        let mut ss = session::load(&store);
-                        if let Some(x) = ss.iter_mut().find(|x| x.pid == pid) {
-                            x.windows_hidden = hidden as u32;
-                            let _ = session::save(&store, &ss);
+                        if let Err(e) = app::watch_hide(&captured, watch) {
+                            info_box(std::ptr::null_mut(), &e, true);
                         }
                     });
                 }
+                Ok(None) => {}
+                Err(e) => identity_error(hwnd, s.pid, s.creation_filetime, &e),
             }
-        }
-        let _ = session::save(&path, &kept);
-        if relaunched > 0 {
-            let hwnd = STATE.with(|st| st.borrow().hwnd);
-            balloon_from_state(
-                hwnd,
-                &format!(
-                    "Relaunched {relaunched} program(s) hidden — they were tucked away before the last shutdown"
-                ),
-                false,
-            );
         }
     }
 
@@ -1002,14 +963,7 @@ mod windows {
     /// programs — launching them if needed — after their delay.
     fn run_auto_entries() {
         let cfg = config::load(&config::config_path());
-        let sessions = session::load(&session::store_path());
         for entry in cfg.entries.iter().filter(|e| e.auto_start) {
-            if sessions
-                .iter()
-                .any(|s| s.program == entry.program && platform::process_alive(s.pid))
-            {
-                continue;
-            }
             let entry: ProgramEntry = entry.clone();
             let default_watch = cfg.watch_seconds;
             std::thread::spawn(move || {
@@ -1017,29 +971,13 @@ mod windows {
                     std::thread::sleep(std::time::Duration::from_secs(entry.delay_seconds));
                 }
                 let watch = entry.watch_seconds.unwrap_or(default_watch);
-                let found = platform::find_process_by_name(entry.file_name());
-                let pid = match found {
-                    Some((pid, _)) => Some(pid),
-                    None => {
-                        if std::path::Path::new(&entry.program).is_file() {
-                            platform::launch_hidden(&entry.program, &entry.args).ok()
-                        } else {
-                            None
-                        }
-                    }
-                };
-                if let Some(pid) = pid {
-                    upsert_session(pid, &entry.program, 0);
-                    let hidden = app::watch_hide(pid, watch);
-                    let store = session::store_path();
-                    let mut ss = session::load(&store);
-                    if let Some(x) = ss.iter_mut().find(|x| x.pid == pid) {
-                        x.windows_hidden = hidden as u32;
-                        if x.args.is_empty() {
-                            x.args = entry.args.clone();
-                        }
-                        let _ = session::save(&store, &ss);
-                    }
+                let result = app::auto_track(&entry.program, &entry.args, entry.file_name())
+                    .and_then(|captured| match captured {
+                        Some(captured) => app::watch_hide(&captured, watch).map(|_| ()),
+                        None => Ok(()),
+                    });
+                if let Err(e) = result {
+                    info_box(std::ptr::null_mut(), &e, true);
                 }
             });
         }
@@ -1165,6 +1103,8 @@ mod windows {
                 0
             }
             WM_CLOSE => {
+                app::stop_background_tracking();
+                restore_everything();
                 unsafe { DestroyWindow(hwnd) };
                 0
             }
@@ -1634,11 +1574,10 @@ mod windows {
                     );
                     if answer == IDYES {
                         for s in &leftover {
-                            if platform::process_alive(s.pid) {
-                                app::show_all(s.pid);
+                            if let Err(e) = app::show_all(s) {
+                                info_box(std::ptr::null_mut(), &e, true);
                             }
                         }
-                        let _ = session::save(&session::store_path(), &[]);
                     }
                 }
             }

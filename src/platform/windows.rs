@@ -15,7 +15,8 @@ const SW_SHOW: i32 = 5;
 const STARTF_USESHOWWINDOW: u32 = 0x0000_0001;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
-const STILL_ACTIVE: u32 = 259;
+const SYNCHRONIZE: u32 = 0x0010_0000;
+const WAIT_TIMEOUT: u32 = 258;
 const TH32CS_SNAPPROCESS: u32 = 0x0000_0002;
 const MAX_PATH: usize = 260;
 
@@ -79,7 +80,14 @@ extern "system" {
     fn GetLastError() -> u32;
     fn CloseHandle(h: Handle) -> Bool;
     fn OpenProcess(access: u32, inherit: Bool, pid: u32) -> Handle;
-    fn GetExitCodeProcess(h: Handle, code: *mut u32) -> Bool;
+    fn WaitForSingleObject(h: Handle, milliseconds: u32) -> u32;
+    fn GetProcessTimes(
+        h: Handle,
+        creation: *mut u64,
+        exit: *mut u64,
+        kernel: *mut u64,
+        user: *mut u64,
+    ) -> Bool;
     fn EnumWindows(cb: extern "system" fn(Hwnd, isize) -> Bool, param: isize) -> Bool;
     fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
     fn ShowWindow(hwnd: Hwnd, cmd: i32) -> Bool;
@@ -124,7 +132,7 @@ fn wide(text: &str) -> Vec<u16> {
     text.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub fn launch_hidden(program: &str, args: &[String]) -> Result<u32, String> {
+pub fn launch_hidden(program: &str, args: &[String]) -> Result<Process, String> {
     let mut cmdline = wide(&build_command_line(program, args));
     let mut si: StartupInfoW = unsafe { std::mem::zeroed() };
     si.cb = std::mem::size_of::<StartupInfoW>() as u32;
@@ -153,9 +161,9 @@ pub fn launch_hidden(program: &str, args: &[String]) -> Result<u32, String> {
     }
     unsafe {
         CloseHandle(pi.h_thread);
-        CloseHandle(pi.h_process);
     }
-    Ok(pi.dw_process_id)
+    Process::from_handle(pi.dw_process_id, OwnedHandle::new(pi.h_process as usize))
+        .map_err(|e| format!("Incomplete hidden launch: owned child pid {}; identity unavailable: {e}. No watcher started.", pi.dw_process_id))
 }
 
 struct EnumState {
@@ -189,23 +197,129 @@ pub fn is_window_visible(hwnd: isize) -> bool {
     visible != 0
 }
 
-pub fn set_window_visible(hwnd: isize, visible: bool) -> bool {
+struct OwnedHandle {
+    raw: usize,
+    close: fn(usize),
+}
+
+impl OwnedHandle {
+    fn new(raw: usize) -> Self {
+        Self {
+            raw,
+            close: |raw| {
+                unsafe { CloseHandle(raw as Handle) };
+            },
+        }
+    }
+}
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        (self.close)(self.raw);
+    }
+}
+
+pub struct Process {
+    handle: OwnedHandle,
+    pub pid: u32,
+    pub creation_filetime: u64,
+}
+
+impl Process {
+    fn from_handle(pid: u32, handle: OwnedHandle) -> Result<Self, String> {
+        let creation_filetime = creation_time(&handle)?;
+        let process = Self {
+            handle,
+            pid,
+            creation_filetime,
+        };
+        process.verify()?;
+        Ok(process)
+    }
+
+    pub fn open(pid: u32) -> Result<Self, String> {
+        let handle =
+            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+        if handle.is_null() {
+            return Err(format!(
+                "Cannot verify pid {pid} (Windows error {}). Action refused.",
+                unsafe { GetLastError() }
+            ));
+        }
+        Self::from_handle(pid, OwnedHandle::new(handle as usize))
+    }
+
+    pub fn verify(&self) -> Result<(), String> {
+        super::verify_identity(
+            Some(self.creation_filetime),
+            creation_time(&self.handle)?,
+            unsafe { WaitForSingleObject(self.handle.raw as Handle, 0) } == WAIT_TIMEOUT,
+        )
+    }
+}
+
+pub fn session_process(pid: u32, expected: Option<u64>) -> Result<Option<Process>, String> {
+    let expected =
+        expected.ok_or("Unverified session: no process creation identity. Action refused.")?;
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        let code = unsafe { GetLastError() };
+        if code == 87 {
+            return Ok(None);
+        }
+        return Err(format!(
+            "Cannot verify pid {pid} (Windows error {code}). Action refused."
+        ));
+    }
+    let handle = OwnedHandle::new(raw as usize);
+    let actual = creation_time(&handle)?;
+    super::verify_identity(Some(expected), actual, true)?;
+    match unsafe { WaitForSingleObject(raw, 0) } {
+        0 => Ok(None),
+        WAIT_TIMEOUT => Ok(Some(Process {
+            handle,
+            pid,
+            creation_filetime: actual,
+        })),
+        _ => Err("Process lifetime is unknown. Action refused.".into()),
+    }
+}
+
+fn creation_time(handle: &OwnedHandle) -> Result<u64, String> {
+    let (mut creation, mut exit, mut kernel, mut user) = (0u64, 0u64, 0u64, 0u64);
+    if unsafe {
+        GetProcessTimes(
+            handle.raw as Handle,
+            &mut creation,
+            &mut exit,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(format!(
+            "Process identity is unknown (Windows error {}). Action refused.",
+            unsafe { GetLastError() }
+        ));
+    }
+    Ok(creation)
+}
+
+pub fn set_window_visible(process: &Process, hwnd: isize, visible: bool) -> Result<(), String> {
+    process.verify()?;
+    super::verify_window_owner(process.pid, window_pid(hwnd))?;
     let cmd = if visible { SW_SHOW } else { SW_HIDE };
     unsafe { ShowWindow(hwnd as Hwnd, cmd) };
-    true
+    process.verify()?;
+    super::verify_window_owner(process.pid, window_pid(hwnd))?;
+    if is_window_visible(hwnd) != visible {
+        return Err("Window visibility could not be confirmed; recovery retained.".into());
+    }
+    Ok(())
 }
 
 pub fn process_alive(pid: u32) -> bool {
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
-        if handle.is_null() {
-            return false;
-        }
-        let mut code: u32 = 0;
-        let ok = GetExitCodeProcess(handle, &mut code);
-        CloseHandle(handle);
-        ok != 0 && code == STILL_ACTIVE
-    }
+    Process::open(pid).is_ok()
 }
 
 struct AppsState {
@@ -424,5 +538,131 @@ pub fn find_process_by_name(name: &str) -> Option<(u32, String)> {
         }
         CloseHandle(snapshot);
         found
+    }
+}
+
+#[repr(C)]
+struct Overlapped {
+    internal: usize,
+    internal_high: usize,
+    offset: u32,
+    offset_high: u32,
+    event: Handle,
+}
+
+extern "system" {
+    fn LockFileEx(
+        file: Handle,
+        flags: u32,
+        reserved: u32,
+        low: u32,
+        high: u32,
+        overlapped: *mut Overlapped,
+    ) -> Bool;
+    fn UnlockFileEx(
+        file: Handle,
+        reserved: u32,
+        low: u32,
+        high: u32,
+        overlapped: *mut Overlapped,
+    ) -> Bool;
+}
+#[link(name = "bcrypt")]
+extern "system" {
+    fn BCryptGenRandom(algorithm: Handle, buffer: *mut u8, size: u32, flags: u32) -> i32;
+}
+
+pub fn new_receipt() -> Result<String, String> {
+    let mut bytes = [0u8; 16];
+    if unsafe { BCryptGenRandom(std::ptr::null_mut(), bytes.as_mut_ptr(), 16, 2) } < 0 {
+        return Err("Could not generate session receipt".into());
+    }
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+pub struct SessionGate {
+    file: std::fs::File,
+}
+impl SessionGate {
+    pub fn acquire(directory: &std::path::Path) -> Result<Self, String> {
+        Self::acquire_for(directory, std::time::Duration::from_secs(2))
+    }
+    pub(crate) fn acquire_for(
+        directory: &std::path::Path,
+        timeout: std::time::Duration,
+    ) -> Result<Self, String> {
+        use std::os::windows::io::AsRawHandle;
+        std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+        let file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(directory.join("sessions.lock"))
+            .map_err(|e| e.to_string())?;
+        let deadline = std::time::Instant::now() + timeout;
+        loop {
+            let mut overlapped: Overlapped = unsafe { std::mem::zeroed() };
+            // Synchronous file, exclusive nonblocking byte zero lock; each attempt owns its handle.
+            if unsafe { LockFileEx(file.as_raw_handle(), 3, 0, 1, 0, &mut overlapped) } != 0 {
+                return Ok(Self { file });
+            }
+            let code = unsafe { GetLastError() };
+            if code != 33 {
+                return Err(format!("Session lock failed (Windows error {code})"));
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("Session store busy: lock timeout".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+}
+impl Drop for SessionGate {
+    fn drop(&mut self) {
+        use std::os::windows::io::AsRawHandle;
+        let mut overlapped: Overlapped = unsafe { std::mem::zeroed() };
+        // Only successfully acquired guards exist; File closes once after this unlock.
+        unsafe {
+            UnlockFileEx(self.file.as_raw_handle(), 0, 1, 0, &mut overlapped);
+        }
+    }
+}
+
+pub fn checked_windows_of(pid: u32) -> Result<Vec<isize>, String> {
+    let mut state = EnumState {
+        pid,
+        windows: Vec::new(),
+    };
+    if unsafe { EnumWindows(enum_cb, &mut state as *mut EnumState as isize) } == 0 {
+        return Err(format!(
+            "Window enumeration failed (Windows error {})",
+            unsafe { GetLastError() }
+        ));
+    }
+    Ok(state.windows)
+}
+
+#[cfg(test)]
+mod identity_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[test]
+    fn owned_handle_closes_once_after_transfer_and_error() {
+        static CLOSED: AtomicUsize = AtomicUsize::new(0);
+        fn close(_: usize) {
+            CLOSED.fetch_add(1, Ordering::SeqCst);
+        }
+        let handle = OwnedHandle { raw: 123, close };
+        let thread = std::thread::spawn(move || {
+            let _owned = handle;
+            Err::<(), _>("inert query failure")
+        });
+        assert!(thread.join().unwrap().is_err());
+        assert_eq!(CLOSED.load(Ordering::SeqCst), 1);
+        let handle = OwnedHandle { raw: 456, close };
+        drop(handle);
+        assert_eq!(CLOSED.load(Ordering::SeqCst), 2);
     }
 }

@@ -12,8 +12,9 @@ mod imp;
 mod imp;
 
 pub use imp::{
-    all_processes, find_process_by_name, is_window_visible, launch_hidden, process_alive,
-    set_window_visible, windows_of,
+    all_processes, checked_windows_of, find_process_by_name, is_window_visible, launch_hidden,
+    new_receipt, process_alive, session_process, set_window_visible, windows_of, Process,
+    SessionGate,
 };
 
 // Used by the tray (Windows-only); on other platforms only the
@@ -98,9 +99,52 @@ fn quote_arg(arg: &str) -> String {
     out
 }
 
+/// Missing persisted identity is never upgraded from the current PID occupant.
+pub fn verify_identity(expected: Option<u64>, actual: u64, active: bool) -> Result<(), String> {
+    let expected =
+        expected.ok_or("Unverified session: no process creation identity. Action refused.")?;
+    if expected != actual {
+        return Err(
+            "Stale session: the PID belongs to a different process. Action refused.".into(),
+        );
+    }
+    if !active {
+        return Err("Process exited or its lifetime is unknown. Action refused.".into());
+    }
+    Ok(())
+}
+
+pub fn verify_window_owner(pid: u32, owner: Option<u32>) -> Result<(), String> {
+    if owner != Some(pid) {
+        return Err("Window ownership changed or is unknown. Action refused.".into());
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identity_and_window_guards_fail_closed() {
+        let cases = [
+            (Some(42), 42, true, Some(7), true),
+            (Some(42), 43, true, Some(7), false), // same PID, new creation
+            (Some(42), 42, false, Some(7), false), // exit during watching
+            (None, 42, true, Some(7), false),     // legacy session
+            (Some(42), 42, true, Some(8), false), // stale window selection
+            (Some(42), 42, true, None, false),    // unknown owner
+        ];
+        for (expected, actual, active, owner, allowed) in cases {
+            let mut actions = 0;
+            let result = verify_identity(expected, actual, active)
+                .and_then(|()| verify_window_owner(7, owner));
+            if result.is_ok() {
+                actions += 1;
+            }
+            assert_eq!(actions, usize::from(allowed));
+        }
+    }
 
     #[test]
     fn plain_args_are_unquoted() {

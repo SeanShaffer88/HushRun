@@ -17,6 +17,15 @@ pub(crate) fn parse(text: &str) -> Option<Json> {
     Parser::new(text).value()
 }
 
+/// Session mutations require a complete document, never a valid prefix of corrupt data.
+pub(crate) fn parse_complete(text: &str) -> Option<Json> {
+    let mut parser = Parser::new(text);
+    parser.strict = true;
+    let value = parser.value()?;
+    parser.skip_ws();
+    (parser.pos == parser.bytes.len()).then_some(value)
+}
+
 pub(crate) fn get<'a>(fields: &'a [(String, Json)], key: &str) -> Option<&'a Json> {
     fields.iter().find(|(k, _)| k == key).map(|(_, v)| v)
 }
@@ -76,6 +85,7 @@ pub(crate) fn esc(text: &str) -> String {
 struct Parser<'a> {
     bytes: &'a [u8],
     pos: usize,
+    strict: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -83,6 +93,7 @@ impl<'a> Parser<'a> {
         Self {
             bytes: text.as_bytes(),
             pos: 0,
+            strict: false,
         }
     }
 
@@ -118,10 +129,19 @@ impl<'a> Parser<'a> {
                     }
                     self.pos += 1;
                     let val = self.value()?;
+                    if self.strict && fields.iter().any(|(existing, _)| existing == &key) {
+                        return None;
+                    }
                     fields.push((key, val));
                     self.skip_ws();
                     match self.peek() {
-                        Some(b',') => self.pos += 1,
+                        Some(b',') => {
+                            self.pos += 1;
+                            self.skip_ws();
+                            if self.strict && matches!(self.peek(), Some(b'}' | b']')) {
+                                return None;
+                            }
+                        }
                         Some(b'}') => {
                             self.pos += 1;
                             return Some(Json::Obj(fields));
@@ -142,7 +162,13 @@ impl<'a> Parser<'a> {
                     items.push(self.value()?);
                     self.skip_ws();
                     match self.peek() {
-                        Some(b',') => self.pos += 1,
+                        Some(b',') => {
+                            self.pos += 1;
+                            self.skip_ws();
+                            if self.strict && matches!(self.peek(), Some(b'}' | b']')) {
+                                return None;
+                            }
+                        }
                         Some(b']') => {
                             self.pos += 1;
                             return Some(Json::Arr(items));
@@ -162,7 +188,8 @@ impl<'a> Parser<'a> {
                 match &self.bytes[start..self.pos] {
                     b"true" => Some(Json::Bool(true)),
                     b"false" => Some(Json::Bool(false)),
-                    _ => Some(Json::Other),
+                    b"null" => Some(Json::Other),
+                    _ => None,
                 }
             }
         }
@@ -202,6 +229,9 @@ impl<'a> Parser<'a> {
                     }
                 }
                 _ => {
+                    if self.strict && byte < 0x20 {
+                        return None;
+                    }
                     // Reassemble UTF-8: collect the full sequence.
                     let start = self.pos - 1;
                     let len = utf8_len(byte);
